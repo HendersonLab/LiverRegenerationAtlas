@@ -1,0 +1,262 @@
+---
+title: <h9 >Human Hepatocyte and Cholangiocyte - Chosen Parameters</h9>
+author: <h7 >Jordan Portman</h7>   
+date: <h7 >`r format(Sys.time(), '%d/%m/%Y')`</h7>
+output:
+  html_notebook:
+    highlight: kate
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+    code_folding: none
+    theme: cosmo
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+
+
+# Load Libraries and Environment Setup - Data Preparation
+
+```{r Libraries and Environement - Data Preparation}
+suppressPackageStartupMessages(library(Seurat))
+suppressPackageStartupMessages(library(SeuratPipe))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tibble))
+source("/Functions/Utils.R")
+seed <- 42 # Seed number for scipt
+set.seed(seed) 
+```
+
+
+# Data Preparation
+
+# Load Data
+
+```{r Load Data - Data Preparation}
+obj <- readRDS("/Human/Data/Hepatocytes/seu_harmony_seed12_npcs40_r14.rds") 
+hepatocytes <- obj$seu
+hepatocytes$cell_type <- "Hepatocyte"
+obj <- readRDS("/Human/Data/Cholangiocytes/seu_harmony_npcs60.rds")
+cholangiocytes <- obj$seu
+cholangiocytes$cell_type <- "Cholangiocyte"
+seu <- merge(hepatocytes, cholangiocytes)
+
+# Add in single lineage annotations
+seu$anno <- NULL
+seu$anno_broad <- NULL
+hep_anno <- read.csv("/Human/Data/Hepatocytes/seu_meta_res0.4_anno.csv", row.names = 1)
+cholan_anno <- read.csv("/Human/Data/Cholangiocytes/seu_meta_res0.3_anno.csv", row.names = 1)
+df <- rbind(hep_anno[,c("orig.ident","anno")], cholan_anno[,c("orig.ident","anno")])
+seu <- AddMetaData(seu, df)
+
+names <- c('orig.ident' ,'sample',"condition","cell_type", "doublet_prediction","anno")
+seu@meta.data[,names] <- lapply(seu@meta.data[,names] , as.factor)
+
+
+
+opts <- list()
+rm(obj)
+```
+
+
+
+## Clean Seurat Object
+
+```{r Clean Seurat Object}
+DefaultAssay(seu) <- "RNA"
+
+#Trim down seurat object using diet seurat
+seu <- DietSeurat(seu, assays = "RNA")
+
+#Remove variable genes
+VariableFeatures(seu) <- NULL
+```
+
+
+```{r}
+Hmisc::describe(seu@meta.data)
+```
+
+
+
+#  SeuratPipe
+
+
+```{r SeuratPipe}
+# Opts
+io <- list() # Input/Output
+io$out_dir <- "Chosen_parameters" # Name of result folder 
+if (!dir.exists(io$out_dir)) dir.create(io$out_dir, recursive = TRUE)
+
+
+# Number of PCs, can be a vector: c(30, 50)
+opts$npcs <- c(50)
+# Top PCs to perform UMAP and clustering, can be a vector: c(30, 40)
+opts$ndims <- c(50)
+# Clustering resolutions
+opts$res <- seq(from = 0.6, to = 0.6, by = 0.1)
+# Batch ID to perform integration
+opts$batch_id <- "orig.ident"
+# QC information to plot
+opts$qc_to_plot <- c("nCount_RNA","nFeature_RNA", "percent.mito", "doublet_score")
+# Metadata columns to plot
+opts$meta_to_plot <- c("orig.ident","sample", "condition", "doublet_prediction","cell_type","anno")
+
+
+# Test genes that are detected in a minimum fraction of min.pct cells
+opts$min.pct <- 0.25
+# Test genes that show, on average, at least X-fold difference
+# between the two groups of cells.
+opts$logfc.threshold <- 0.5
+# Only return positive markers
+opts$only.pos <- TRUE
+# Maximum number of marker genes to plot for each cluster
+opts$topn_genes <- 10
+# Retain marker genes per cluster if their
+# `pct.1 - pct.2 > diff_cluster_pct`, i.e. they show cluster
+# specific expression. Set to -Inf, to ignore this additional filtering.
+opts$diff_cluster_pct <- 0.1
+# Adjusted p-value threshold to consider marker genes per cluster.
+opts$pval_adj <- 0.05
+# Should we create feature plots of cluster markers?
+opts$plot_cluster_markers = TRUE
+# Which PCs to remove prior to running harmony (technical effects)
+# Can be a vector e.g. c(1, 2, 4). If NULL, all PCs are used as input.
+opts$pcs_to_remove <- NULL
+# Maximum cutoff values for plotting continuous features, e.g. gene expression
+# Gives better plots where colour scale is not driven by a (few) outlier cells.
+# Set to NULL to recoved default Seurat plots
+opts$max.cutoff <- "q98"
+# Filename of the integrated object to be stored on disk
+opts$obj_filename <- "seu_harmony"
+# If integrated Harmony file exists, should we force re-analysis
+# of Harmony, or read object? For computing time efficiency purposes.
+opts$force_reanalysis = TRUE
+
+
+# Number of highly variable genes to compute
+opts$n_hvgs <- 6000
+# Set specific seed for reproducibility
+opts$seed <- 42
+# Discrete colour palette
+opts$discrete_col_pal <- SeuratPipe:::discrete_col_pal
+# Whether to label the clusters in 'plot_reduction' space.
+opts$label <- TRUE
+# Sets size of labels.
+opts$label.size <- 6
+# Adjust point size for plotting.
+opts$pt.size <- 1.4
+# Figure resolution in ppi
+opts$fig.res = 200
+
+
+# Load modules
+#EG
+zonation <- list(central = read.csv("/Gene_Annotation/human_hep_spata_zonation_markers.csv",row.names = 1) %>% filter(pattern == "One peak (reversed)") %>% pull(variables),
+                 portal = read.csv("/Gene_Annotation/human_hep_spata_zonation_markers.csv",row.names = 1) %>% filter(pattern == "One peak") %>% pull(variables))
+
+migration = readRDS("/Gene_Annotation/human_hep_migratory_markers_both_top25.rds")
+
+# Group all modules in named list to pass to SeuratPipe functions
+opts$modules_group <- list(lineage = human_liver_lineage_markers,
+                           zonation = zonation,
+                           migration = migration)
+
+
+
+##-----------------------------------------------------------------------
+# Analysis pipeline
+##-----------------------------------------------------------------------
+
+# Perform data integration using Harmony
+seu <- run_harmony_pipeline(
+  seu_obj = seu,
+  out_dir = io$out_dir,
+  batch_id = opts$batch_id,
+  npcs = opts$npcs,
+  ndims = opts$ndims,
+  res = opts$res,
+  modules_group = opts$modules_group,
+  metadata_to_plot = opts$meta_to_plot,
+  qc_to_plot = opts$qc_to_plot,
+  logfc.threshold = opts$logfc.threshold,
+  min.pct = opts$min.pct,
+  only.pos = opts$only.pos,
+  topn_genes = opts$topn_genes,
+  diff_cluster_pct = opts$diff_cluster_pct,
+  pval_adj = opts$pval_adj,
+  pcs_to_remove = opts$pcs_to_remove,
+  obj_filename = opts$obj_filename,
+  force_reanalysis = opts$force_reanalysis,
+  plot_cluster_markers = opts$plot_cluster_markers,
+  max.cutoff = opts$max.cutoff,
+  n_hvgs = opts$n_hvgs,
+  seed = opts$seed,
+  discrete_col_pal = opts$discrete_col_pal,
+  label = opts$label,
+  label.size = opts$label.size,
+  pt.size = opts$pt.size,
+  fig.res = opts$fig.res,
+  heatmap_downsample_cols = 500)
+```
+
+
+
+# Save Data
+
+```{r Save Data}
+# Save updated metadata
+opts$final_annoation_dir <- paste0(getwd(),"/",io$out_dir,"/")
+saveRDS(object = list(seu = seu, opts = opts),
+              file = paste0(opts$final_annoation_dir, "Human_Hepatocytes_and_Cholangiocytes_final.rds"))
+
+file.remove(paste0(io$out_dir,"/",grep(paste0(opts$obj_filename,"*.*rds"), list.files(io$out_dir), value = TRUE))) # Remove intermediate RDS files
+```
+
+
+
+# GO Analysis
+
+## Set Parameters
+
+```{r Set Parameters}
+## Settings
+quick_analysis <- TRUE
+species <- "human" # Speices of data, either human or mouse
+npcs <-  opts$npcs# Number of PCs
+dims <-  opts$ndims# Top PC dimensions to perform UMAP and clustering
+res <-  opts$res# Clustering resolution
+results_dir <- io$out_dir#Folder of results
+pcs_to_remove <- opts$pcs_to_remove
+npcs_dir <- npcs
+if(!is.null(pcs_to_remove)) {
+  npcs_dir <- paste0(npcs_dir, "_r", paste(pcs_to_remove, collapse = ""))
+}
+
+out_dir <- paste0(results_dir, "/geneset_analysis/",
+                  "npcs", npcs_dir, "_dim", dims, "_res", res, "/")
+
+markers_file <- paste0(results_dir, "/seu_harmony_npcs", npcs_dir, "/dim", dims,
+                            "/clusters/seu_markers_res", res, ".csv")
+
+
+```
+
+## Run GO
+
+```{r Run GO}
+tmp <- geneset_analysis(
+  gene_markers = markers_file, out_dir = out_dir, species = species,
+  topn_genes = NULL, cluster_pval_adj = 0.05, quick_analysis = quick_analysis,
+  ontologies = c("BP"), gs_pval_adj = 0.05, gs_qval = 0.1)
+```
+
+
+# Session Info
+
+```{r Session Info}
+sessionInfo()
+```

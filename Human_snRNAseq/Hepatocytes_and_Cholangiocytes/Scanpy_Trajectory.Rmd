@@ -1,0 +1,171 @@
+---
+title: <h9 >Hepatocyte and Cholangiocytes - Scanpy Trajectory</h9>
+author: <h7 >Jordan Portman</h7>   
+date: <h7 >`r format(Sys.time(), '%d/%m/%Y')`</h7>
+output:
+  html_notebook:
+    highlight: kate
+    toc: yes
+    toc_float: yes
+    toc_depth: 6
+    code_folding: none
+    theme: cosmo
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Load Libraries
+
+```{r Libraries and Environement - Data Preparation}
+suppressPackageStartupMessages(library(Seurat))
+suppressPackageStartupMessages(library(SeuratPipe))
+suppressPackageStartupMessages(library(SeuratDisk))
+suppressPackageStartupMessages(library(reticulate))
+suppressPackageStartupMessages(library(tibble))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(ggplot2))
+
+use_condaenv("scanpy")
+py_config()
+seed <- 42 # Seed number for scipt
+set.seed(seed) 
+```
+
+# Load data and Convert
+
+```{r Load Data}
+obj <- readRDS("/Human/Data/Hepatocytes/seu_harmony_seed12_npcs40_r14.rds") 
+hepatocytes <- obj$seu
+hepatocytes$cell_type <- "Hepatocyte"
+obj <- readRDS("/Human/Data/Cholangiocytes/seu_harmony_npcs60.rds")
+cholangiocytes <- obj$seu
+cholangiocytes$cell_type <- "Cholangiocyte"
+seu <- merge(hepatocytes, cholangiocytes)
+
+# Add in single lineage annotations
+seu$anno <- NULL
+seu$anno_broad <- NULL
+hep_anno <- read.csv("/Human/Data/Hepatocytes/seu_meta_res0.4_anno.csv", row.names = 1)
+cholan_anno <- read.csv("/Human/Data/Cholangiocytes/seu_meta_res0.3_anno.csv", row.names = 1)
+df <- rbind(hep_anno[,c("orig.ident","anno")], cholan_anno[,c("orig.ident","anno")])
+seu <- AddMetaData(seu, df)
+
+names <- c('orig.ident' ,'sample',"condition","cell_type", "doublet_prediction","anno")
+seu@meta.data[,names] <- lapply(seu@meta.data[,names] , as.factor)
+
+opts <- list()
+rm(obj)
+```
+
+
+```{r}
+seu <- DietSeurat(seu)
+seu <- NormalizeData(seu)
+seu <- FindVariableFeatures(seu, nfeatures = 6000)
+
+seu$anno <- as.character(seu$anno)
+seu$cell_type <- as.character(seu$cell_type)
+seu$anno[seu$anno %in% "Cycling" & seu$cell_type == "Hepatocyte"] <- "Cycling_Hep"
+seu$anno[seu$anno %in% "Cycling" & seu$cell_type == "Cholangiocyte"] <- "Cycling_Cho"
+
+seu <- CellCycleScoring(seu, s.features = cc.genes.updated.2019$s.genes, g2m.features = cc.genes.updated.2019$g2m.genes, set.ident = TRUE)
+
+seu <- ScaleData(seu, vars.to.regress = c("S.Score", "G2M.Score"))
+seu <- RunPCA(seu, npcs = 50)
+seu <- SeuratPipe::run_harmony(seu, group.by.vars = "orig.ident", dims.use = 1:50)
+seu <- RunUMAP(seu, reduction = "harmony", dims = 1:50)
+DimPlot(seu, group.by = "anno")
+
+#Conver to scanpy obj
+SaveH5Seurat(seu, filename = "/Hepatocytes_and_cholangiocytes/Human/Chosen_parameters/Hep_Colang.h5Seurat", overwrite = TRUE)
+Convert("/Hepatocytes_and_cholangiocytes/Human/Chosen_parameters/Hep_Colang.h5Seurat", dest = "h5ad", overwrite = TRUE)
+```
+
+
+
+# Scanpy Trajectory
+
+
+```{python}
+import matplotlib
+matplotlib.use('Agg')
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as pl
+from matplotlib import rcParams
+import scanpy as sc
+import igraph as igraph
+
+
+adata = sc.read_h5ad("Chosen_parameters/Hep_Colang.h5ad")
+np.random.seed(42)
+sc.pp.neighbors(adata, n_neighbors=20, n_pcs=50, use_rep='X_harmony')
+
+sc.tl.diffmap(adata, n_comps = 50)
+sc.pl.diffmap(adata, color = "orig.ident")
+sc.pp.neighbors(adata, n_neighbors=20, n_pcs=50, use_rep='X_diffmap')
+sc.tl.draw_graph(adata)
+adata.obs["anno"] = adata.obs["anno"].astype("category")
+adata.obs["cell_type"] = adata.obs["cell_type"].astype("category")
+
+sc.pl.draw_graph(adata, color='anno', legend_loc='on data')
+sc.pl.draw_graph(adata, color='cell_type', legend_loc='on data')
+
+sc.tl.paga(adata, groups='anno')
+sc.pl.paga(adata, color='anno')
+sc.pl.paga(adata, color='anno', threshold = 0.1)
+sc.pl.umap(adata, color = 'anno')
+
+sc.tl.draw_graph(adata, init_pos='paga')
+sc.pl.draw_graph(adata, color=['anno'], legend_loc='on data')
+```
+
+# PAGA Plot
+
+```{r Prepare paga object}
+paga <- list(
+  connectivities = (py$adata$uns$paga$connectivities$todense()),
+  connectivities_tree = (py$adata$uns$paga$connectivities$todense()),
+  group_name = (py$adata$uns$paga$groups),
+  groups = levels((py$adata$obs$anno)),
+  group_colors = setNames((py$adata$uns$anno_colors), c(0:(nrow((py$adata$uns$paga$pos))-1))),
+  position = tibble(
+    group = levels((py$adata$obs$anno)),
+    x = as.data.frame((py$adata$uns$paga$pos))$V1,
+    y = as.data.frame((py$adata$uns$paga$pos))$V2
+  ),
+  umap = tibble(
+    UMAP_1 = as.data.frame((py$adata$obsm["X_umap"]))$V1,
+    UMAP_2 = as.data.frame((py$adata$obsm["X_umap"]))$V2
+  )
+)
+
+rownames(paga$connectivities) <- c(1:nrow(paga$pos))
+colnames(paga$connectivities) <- c(1:nrow(paga$pos))
+
+paga$position$group <- factor(paga$position$group)
+
+seu@misc$paga <- paga
+```
+
+
+
+
+
+```{r Add reductions}
+df <- py$adata$obsm["X_draw_graph_fa"]
+rownames(df) <- py$adata$obs_names$tolist()
+colnames(df) <- c("FA1","FA2")
+seu@reductions$fdg <- CreateDimReducObject(df, key = "FA")
+
+df <- py$adata$obsm["X_diffmap"]
+rownames(df) <- py$adata$obs_names$tolist()
+seu@reductions$Diff <- CreateDimReducObject(df, key = "diff")
+
+```
+
+```{r save new object}
+saveRDS(seu, "Chosen_parameters/Human_Hepatocytes_and_Cholangiocytes_final_Updated.rds")
+```
+
